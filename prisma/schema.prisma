@@ -1,0 +1,1303 @@
+// Prisma schema — sangha-system
+//
+// ==== P1 Project Foundation (ตั้งค่า PostgreSQL + Prisma) ====
+// 2 ตารางพื้นฐานที่ทุกโมดูลใช้ร่วมกัน:
+//   - User: ตัวตนผู้ใช้ขั้นต่ำ (RBAC เต็มรูปแบบ + ผูก Auth.js เป็นเฟส "Auth & RBAC
+//     Foundation" ถัดไป ตาม project-charter.md ข้อ 12 และ ADR-0003)
+//   - AuditLog: ตาราง audit แบบ generic/polymorphic (entityType + entityId) ที่ทุก
+//     โมดูลเขียนเข้ามาเมื่อมีการ create/update/delete ข้อมูลสำคัญ ตาม data-policy.md
+//     ข้อ 7 และ dev-rules.md ข้อ 6 — เป็น append-only บังคับด้วย database trigger
+//
+// ==== P2 Database & Sangha Domain (ออกแบบฐานข้อมูลคณะสงฆ์) ====
+// ขอบเขตของงานนี้ตามที่ระบุ: organizations, hierarchy, positions, appointments,
+// contacts, addresses, organization status และ history เท่านั้น — เป็นส่วน
+// "โครงสร้างองค์กร/สายการปกครอง" ของ M1 (ทะเบียนคณะสงฆ์ ใน requirements.md)
+// ไม่รวมทะเบียนพระภิกษุ/สามเณรแบบเต็มรูปแบบ (ประวัติการบวช, การศึกษา, การย้ายสังกัด ฯลฯ)
+// ซึ่งเป็นงานคนละส่วนที่ต้องออกแบบแยกต่างหากในเฟสถัดไป — Person ด้านล่างจึงเป็นเพียง
+// "stub" ขั้นต่ำสุดเพื่อให้ Appointment มี FK อ้างอิงได้เท่านั้น ไม่ใช่ทะเบียนพระฉบับเต็ม
+// (ดูรายละเอียดเหตุผลการออกแบบทั้งหมดใน prisma/data-dictionary.md)
+// ตารางใหม่: Organization, OrganizationHierarchyRule, OrganizationStatusHistory,
+// Position, Person (stub), Appointment, Contact, Address
+//
+// ==== P2 Database & Sangha Domain — โดเมนนักธรรม/ธรรมศึกษา/บาลี (M2) ====
+// ขอบเขตของงานนี้ตามที่ระบุ: programs, levels, subjects, curriculum, academic years,
+// exam sessions, exam centers และ relationships เท่านั้น — ตรงกับ M2 หลักสูตรและ
+// ระดับการศึกษา ใน requirements.md (นักธรรม ตรี/โท/เอก, ธรรมศึกษา ตรี/โท/เอก, บาลี
+// ประโยค 1–9) ไม่รวมคลังข้อสอบจริง/การจัดสอบ/บันทึกคะแนนนักเรียนรายบุคคล (M3/M4)
+// ออกแบบให้ "ไม่ hard-code ชั้น/ปี" ตามที่ระบุ: Level และ AcademicYear เป็นตาราง
+// ข้อมูล ไม่ใช่ enum — เพิ่มปีการศึกษาใหม่หรือระดับชั้นใหม่ทำได้ด้วย INSERT ธรรมดา
+// ไม่ต้อง migrate schema ใหม่ (ดูรายละเอียดเหตุผลการออกแบบทั้งหมดใน
+// prisma/education-schema.md)
+// ตารางใหม่: AcademicYear, Program, Level, Subject, Curriculum (append-only,
+// เหมือน OrganizationStatusHistory), CurriculumLevelSubject, ExamCenter,
+// ExamSession, ExamSessionCenter, ExamSchedule
+//
+// ==== P2 Database & Sangha Domain — คลังข้อสอบและเอกสาร (M3) ====
+// ขอบเขตของงานนี้ตามที่ระบุ: exam sets, questions, choices, answer keys,
+// document metadata, versions, categories, tags เท่านั้น — ตรงกับ M3 คลังข้อสอบ
+// ใน requirements.md ไม่รวมการจัดสอบจริง/บันทึกคะแนนนักเรียนรายบุคคล/ประกาศผล (M4)
+// และไม่รวมการอัปโหลด/จัดเก็บไฟล์จริง (M8 Object Storage — DocumentVersion.fileKey
+// เป็นเพียง placeholder คอลัมน์ ยังไม่เชื่อมกับ storage จริง)
+// หลักการสำคัญ: Question/Document แยก "identity" (Question/Document) ออกจาก
+// "เนื้อหาที่มีเวอร์ชัน" (QuestionVersion/DocumentVersion) ตามข้อกำหนด "เวอร์ชัน —
+// ห้ามลบ/เขียนทับของเดิมเมื่อมีการแก้ไข": แก้ไขได้อย่างอิสระขณะยังเป็น DRAFT แต่ทันทีที่
+// ส่งเข้า workflow อนุมัติ (status ≠ DRAFT) แถวนั้นจะถูกล็อกด้วย DB trigger ทันที
+// แก้ไขต่อ = ต้องสร้างเวอร์ชันใหม่เท่านั้น (ดูรายละเอียดเหตุผลทั้งหมดใน
+// prisma/exam-document-schema.md)
+// ตารางใหม่: Category, Tag, Question, QuestionCategory, QuestionTag,
+// QuestionVersion, QuestionChoice, AnswerKey, Document, DocumentCategory,
+// DocumentTag, DocumentVersion, ExamSet, ExamSetItem
+//
+// ==== หมายเหตุสำคัญเรื่อง tooling (ใช้กับทุกเฟส) ====
+// `npx prisma generate` / `migrate dev` ไม่สามารถรันได้จริงในสภาพแวดล้อมที่ใช้พัฒนา
+// schema นี้ เพราะ Prisma CLI ต้องดาวน์โหลด schema-engine binary จาก binaries.prisma.sh
+// ซึ่งถูกบล็อกโดยนโยบายเครือข่าย (เหมือนกรณี ui.shadcn.com และ Google Fonts ใน P1
+// Project Foundation) — รายละเอียดเต็มอยู่ใน prisma/MIGRATIONS.md หัวข้อ
+// "ข้อจำกัดของเครื่องมือ (Tooling Limitation)"; schema และ migration ทั้งหมดถูกเขียน
+// ด้วยมือตาม convention จริงของ Prisma แล้วทดสอบจริงกับ PostgreSQL ผ่าน
+// prisma/dev-migrate-verify.mjs
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum UserRole {
+  SUPER_ADMIN
+  CENTRAL_OFFICER
+  REGIONAL_ADMIN
+  REGISTRAR_STAFF
+  TEACHER
+  EXAMINER
+  STUDENT
+  AUDITOR
+
+  @@map("user_role")
+}
+
+enum UserStatus {
+  PENDING_VERIFICATION
+  PENDING_APPROVAL
+  ACTIVE
+  SUSPENDED
+  REJECTED
+
+  @@map("user_status")
+}
+
+enum AuditAction {
+  CREATE
+  UPDATE
+  DELETE
+
+  @@map("audit_action")
+}
+
+/// ตัวตนผู้ใช้ขั้นต่ำ — ไม่ผูกกับ Auth.js adapter tables ในเฟสนี้โดยตั้งใจ (ดูหมายเหตุด้านบน)
+model User {
+  id     String     @id @default(cuid())
+  email  String     @unique
+  name   String
+  role   UserRole
+  status UserStatus @default(PENDING_VERIFICATION)
+
+  /// bcrypt hash เท่านั้น — ไม่เคยเก็บ/log plaintext (data-policy.md: Secret tier)
+  /// Nullable: ผู้ใช้ที่ Admin สร้างไว้แต่ยังไม่ตั้งรหัสผ่าน หรือรอผูก OAuth ในอนาคต
+  /// (นอกขอบเขตงานนี้ — ดู prisma/AUTH.md ข้อ "ขอบเขตที่ตัดออก")
+  passwordHash String?
+
+  /// เชื่อมกับระเบียนทะเบียนบุคคล (M1 Sangha Registry) — ใช้เป็นฐานของ scope
+  /// "OWN_RECORD" (เฉพาะของตน) ในเลเยอร์ authorization (src/lib/scope.ts) เช่น
+  /// Student ดูทะเบียน/ผลสอบของตนเอง — เพิ่มในงาน RBAC + Scope-based Permission
+  /// (P3) นี้ เพราะก่อนหน้านี้ไม่มีความเชื่อมโยงระหว่าง User กับ Person เลย
+  /// Nullable/unique: ไม่ใช่ทุก User จะมี Person (เช่น เจ้าหน้าที่ธุรการ) และหนึ่ง
+  /// Person ผูกกับหนึ่ง User เท่านั้น
+  personId String? @unique
+  person   Person? @relation(fields: [personId], references: [id])
+
+  createdAt DateTime  @default(now())
+  updatedAt DateTime  @updatedAt
+  /// Soft delete — ห้าม hard delete ผู้ใช้ตาม data-policy.md ข้อ 7 (no-overwrite/history)
+  deletedAt DateTime?
+
+  auditLogsAsActor         AuditLog[]                   @relation("AuditLogActor")
+  orgStatusHistoryRecorded OrganizationStatusHistory[]
+
+  questionVersionsAuthored  QuestionVersion[] @relation("QuestionVersionAuthor")
+  questionVersionsApproved  QuestionVersion[] @relation("QuestionVersionApprover")
+  documentVersionsAuthored  DocumentVersion[] @relation("DocumentVersionAuthor")
+  documentVersionsApproved  DocumentVersion[] @relation("DocumentVersionApprover")
+  examSetsAuthored          ExamSet[]         @relation("ExamSetAuthor")
+  examSetsApproved          ExamSet[]         @relation("ExamSetApprover")
+
+  /// P4 ข่าว/บทความ (M10) — ดู model NewsArticle ด้านล่าง
+  newsArticlesAuthored NewsArticle[] @relation("NewsArticleAuthor")
+
+  loginLockout   LoginLockout?
+  loginAuditLogs LoginAuditLog[]
+
+  /// scope-based RBAC (P3 M9) — ดู roles-permissions.md
+  organizationScopesHeld    UserOrganizationScope[] @relation("UserOrganizationScopeUser")
+  organizationScopesGranted UserOrganizationScope[] @relation("UserOrganizationScopeGrantedBy")
+  organizationScopesRevoked UserOrganizationScope[] @relation("UserOrganizationScopeRevokedBy")
+  programScopesHeld         UserProgramScope[]      @relation("UserProgramScopeUser")
+  programScopesGranted      UserProgramScope[]      @relation("UserProgramScopeGrantedBy")
+  programScopesRevoked      UserProgramScope[]      @relation("UserProgramScopeRevokedBy")
+
+  @@map("users")
+}
+
+/// ขอบเขตตามลำดับชั้นการปกครอง (organization scope) — ให้สิทธิ์ผู้ใช้ "ครอบคลุม"
+/// องค์กรที่ระบุ + ลูกหลานทั้งหมดใต้องค์กรนั้น (cascade ลงล่างตาม parentId tree)
+/// ตรวจสอบผ่าน recursive query ใน src/lib/scope.ts ไม่ denormalize เป็น closure
+/// table (ดูเหตุผลใน migration.sql) — append-only: ถอนสิทธิ์ = ตั้ง revokedAt
+/// (บังคับด้วย DB trigger) ไม่ใช่ลบแถว ตาม data-policy.md ข้อ 7
+model UserOrganizationScope {
+  id String @id @default(cuid())
+
+  userId String
+  user   User   @relation("UserOrganizationScopeUser", fields: [userId], references: [id], onDelete: Cascade)
+
+  organizationId String
+  organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+
+  grantedById String?
+  grantedBy   User?   @relation("UserOrganizationScopeGrantedBy", fields: [grantedById], references: [id])
+
+  createdAt DateTime @default(now())
+
+  /// ไม่ null = ถูกถอนสิทธิ์แล้ว (แถวยังอยู่เพื่อประวัติ ไม่ถูกลบ)
+  revokedAt   DateTime?
+  revokedById String?
+  revokedBy   User?     @relation("UserOrganizationScopeRevokedBy", fields: [revokedById], references: [id])
+
+  @@index([userId])
+  @@index([organizationId])
+  @@map("user_organization_scopes")
+}
+
+/// ขอบเขตตามสายการศึกษา (program scope) — เช่น ครู/กรรมการที่รับผิดชอบเฉพาะสาย
+/// นักธรรม หรือเฉพาะสายบาลี ไม่ควรแตะข้อมูล/ข้อสอบของสายอื่น โครงสร้าง/นโยบาย
+/// append-only เดียวกับ UserOrganizationScope ด้านบน
+model UserProgramScope {
+  id String @id @default(cuid())
+
+  userId String
+  user   User   @relation("UserProgramScopeUser", fields: [userId], references: [id], onDelete: Cascade)
+
+  programId String
+  program   Program @relation(fields: [programId], references: [id], onDelete: Cascade)
+
+  grantedById String?
+  grantedBy   User?   @relation("UserProgramScopeGrantedBy", fields: [grantedById], references: [id])
+
+  createdAt DateTime @default(now())
+
+  revokedAt   DateTime?
+  revokedById String?
+  revokedBy   User?     @relation("UserProgramScopeRevokedBy", fields: [revokedById], references: [id])
+
+  @@index([userId])
+  @@index([programId])
+  @@map("user_program_scopes")
+}
+
+/// Rate-limiting การ login ผิดพลาด — ตาราง Postgres (counter + expiry) ตาม
+/// architecture.md §3.4 และ ADR-0004 ข้อ 2 (ตัดสินใจไม่ใช้ Redis) แถวนี้เป็น
+/// "operational state" mutable/reset ได้ตามปกติ ไม่ใช่ audit history — ประวัติ
+/// การพยายาม login จริงเก็บแยกแบบ append-only ที่ LoginAuditLog ด้านล่าง
+model LoginLockout {
+  userId String @id
+  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  failedAttempts Int       @default(0)
+  /// NULL = ไม่ถูกล็อก; ค่าในอดีต = ล็อกหมดอายุแล้ว (ไม่ลบทิ้ง ปล่อยให้ attempt ถัดไป
+  /// เขียนทับตามปกติของ operational counter)
+  lockedUntil    DateTime?
+  updatedAt      DateTime  @updatedAt
+
+  @@map("login_lockouts")
+}
+
+enum LoginFailureReason {
+  INVALID_CREDENTIALS
+  ACCOUNT_LOCKED
+  ACCOUNT_INACTIVE
+
+  @@map("login_failure_reason")
+}
+
+/// Audit การ login ทุกครั้ง (สำเร็จ/ล้มเหลว) แบบ append-only บังคับด้วย DB trigger
+/// (ดู migration.sql) — แยกจาก AuditLog ทั่วไปเพราะ login attempt ที่ email ไม่มี
+/// อยู่จริงไม่มี User row ให้ actorId อ้างอิง ตามที่ requirements.md §8 (Login spec)
+/// กำหนดให้บันทึก timestamp, IP, user-agent ทุกครั้ง
+model LoginAuditLog {
+  id             String              @id @default(uuid())
+  emailAttempted String
+  userId         String?
+  user           User?               @relation(fields: [userId], references: [id], onDelete: SetNull)
+  success        Boolean
+  /// สำหรับ diagnostics ฝั่ง server เท่านั้น — ห้ามส่งค่านี้ตรงๆ ให้ client
+  /// (data-policy.md: ห้าม leak รายละเอียดที่ช่วย account enumeration)
+  failureReason  LoginFailureReason?
+  ipAddress      String?
+  userAgent      String?
+  createdAt      DateTime            @default(now())
+
+  @@index([userId])
+  @@index([emailAttempted])
+  @@index([createdAt])
+  @@map("login_audit_logs")
+}
+
+/// Audit log แบบ generic/polymorphic — append-only บังคับด้วย DB trigger (ดู migration.sql)
+/// ทุกโมดูลในอนาคต (M1–M9) เขียนเข้ามาเมื่อมีการเปลี่ยนแปลงข้อมูลสำคัญ แทนการมีตาราง
+/// ประวัติแยกต่อ entity — ตัดสินใจไว้ใน dev-rules.md ข้อ 6 ("... หรือ pattern versioning
+/// ที่ตกลงร่วมกัน")
+model AuditLog {
+  id         String      @id @default(cuid())
+  entityType String
+  entityId   String
+  action     AuditAction
+
+  /// ผู้กระทำ — เป็น null ได้สำหรับ system job (service account ไม่ใช่ผู้ใช้ในตาราง users)
+  actorId String?
+  actor   User?   @relation("AuditLogActor", fields: [actorId], references: [id])
+
+  /// ค่าก่อน/หลังการเปลี่ยนแปลง — ต้อง mask ค่า Restricted/Secret ก่อนบันทึกเสมอ
+  /// (data-policy.md ข้อ 5) เขียนที่ application layer ก่อนส่งเข้ามาที่นี่
+  before Json?
+  after  Json?
+
+  createdAt DateTime @default(now())
+
+  @@index([entityType, entityId])
+  @@index([actorId])
+  @@map("audit_logs")
+}
+
+// =====================================================================
+// P2 Database & Sangha Domain — organizations / hierarchy / positions /
+// appointments / contacts / addresses / organization status & history
+// =====================================================================
+
+/// ประเภทหน่วยงานในสายการปกครองคณะสงฆ์ — ระดับจากบนลงล่างโดยประมาณ:
+/// MAHATHERASAMAKHOM (มหาเถรสมาคม) → SANGHA_ZONE (หน) → SANGHA_REGION (ภาค) →
+/// SANGHA_PROVINCE (จังหวัด) → SANGHA_DISTRICT (อำเภอ) → SANGHA_SUBDISTRICT (ตำบล) →
+/// TEMPLE (วัด) — STUDY_INSTITUTE (สำนักเรียน) และ EXAM_OFFICE (สำนักงานแม่กอง
+/// ธรรม/บาลีสนามหลวง) แนบอยู่ในสายแยกภายใต้ MAHATHERASAMAKHOM ลำดับชั้นที่อนุญาตจริง
+/// (parent/child ใครเป็นลูกของใครได้) ไม่ได้ hardcode ในโค้ด แต่เก็บเป็นข้อมูลใน
+/// OrganizationHierarchyRule ด้านล่าง เพื่อให้แก้ไขได้โดยไม่ต้องออก migration ใหม่
+/// ทุกครั้งที่มีการปรับโครงสร้างการปกครองจริง
+enum OrganizationType {
+  MAHATHERASAMAKHOM
+  SANGHA_ZONE
+  SANGHA_REGION
+  SANGHA_PROVINCE
+  SANGHA_DISTRICT
+  SANGHA_SUBDISTRICT
+  TEMPLE
+  STUDY_INSTITUTE
+  EXAM_OFFICE
+
+  @@map("organization_type")
+}
+
+/// สถานะปัจจุบันของหน่วยงาน — ค่าปัจจุบันอ่านจาก Organization.status โดยตรง (เร็ว)
+/// ส่วนประวัติการเปลี่ยนแปลงทั้งหมดอยู่ใน OrganizationStatusHistory แยกต่างหาก
+/// ตาม data-policy.md ข้อ 7 ("ค่าปัจจุบันอ่านเร็วจากตารางหลัก ส่วนประวัติอ่านจากตาราง
+/// history แยก ไม่ผสมกันจนกระทบ performance")
+enum OrganizationStatus {
+  ACTIVE
+  INACTIVE
+  SUSPENDED
+  DISSOLVED
+  MERGED
+
+  @@map("organization_status")
+}
+
+enum AddressType {
+  MAIN
+  MAILING
+  OTHER
+
+  @@map("address_type")
+}
+
+enum ContactType {
+  PHONE
+  MOBILE
+  FAX
+  EMAIL
+  WEBSITE
+  LINE
+  OTHER
+
+  @@map("contact_type")
+}
+
+enum AppointmentStatus {
+  ACTIVE
+  RESIGNED
+  REMOVED
+  TRANSFERRED
+  DECEASED
+  EXPIRED
+
+  @@map("appointment_status")
+}
+
+/// หน่วยงานในสายการปกครองคณะสงฆ์ (โครงสร้างต้นไม้ผ่าน parentId อ้างอิงตัวเอง)
+/// ความถูกต้องของคู่ (childType, parentType) บังคับด้วย DB trigger
+/// organizations_validate_hierarchy() ที่ตรวจกับตาราง OrganizationHierarchyRule
+/// (ดู migration.sql) — ไม่ใช่แค่ FK ธรรมดา เพราะต้องกันไม่ให้ เช่น วัด (TEMPLE)
+/// ถูกตั้งเป็นลูกของจังหวัด (SANGHA_PROVINCE) โดยตรงโดยข้ามชั้นอำเภอ/ตำบล
+model Organization {
+  id   String           @id @default(cuid())
+  /// รหัสหน่วยงาน/ทะเบียน — ไม่บังคับทุกหน่วยงาน (บางหน่วยงานยังไม่มีเลขทะเบียนดิจิทัล)
+  /// unique เฉพาะกรณีที่ไม่เป็น null (partial unique index — ดู migration.sql)
+  code String?
+  type OrganizationType
+  name String
+  nameEn String?
+
+  parentId String?
+  parent   Organization?  @relation("OrganizationHierarchy", fields: [parentId], references: [id])
+  children Organization[] @relation("OrganizationHierarchy")
+
+  /// สถานะปัจจุบัน (denormalized จาก OrganizationStatusHistory แถวล่าสุด เพื่อความเร็ว
+  /// ในการ query — แอปพลิเคชันต้อง insert แถวใหม่ใน OrganizationStatusHistory ทุกครั้ง
+  /// ที่แก้ค่านี้ ภายใน transaction เดียวกัน ตาม data-policy.md ข้อ 10)
+  status         OrganizationStatus @default(ACTIVE)
+  establishedDate DateTime?
+  dissolvedDate   DateTime?
+
+  createdAt DateTime  @default(now())
+  updatedAt DateTime  @updatedAt
+  /// Soft delete — ใช้กับกรณีบันทึกผิดพลาดเท่านั้น การยุบ/รวมหน่วยงานจริงให้ใช้
+  /// status = DISSOLVED/MERGED + OrganizationStatusHistory แทน ไม่ soft-delete
+  /// หน่วยงานที่เคยมีอยู่จริงในประวัติศาสตร์
+  deletedAt DateTime?
+
+  statusHistory        OrganizationStatusHistory[]
+  addresses            Address[]
+  contacts             Contact[]
+  appointments         Appointment[]              @relation("AppointmentOrganization")
+  appointmentsIssuedBy Appointment[]               @relation("AppointmentIssuingOrganization")
+  /// ใช้เมื่อหน่วยงานนี้ (เช่น วัด) ถูกใช้เป็นสนามสอบด้วย (M2 education domain)
+  examCenters          ExamCenter[]
+  /// scope-based RBAC (P3 M9) — ผู้ใช้ที่ได้รับสิทธิ์ครอบคลุมองค์กรนี้ (+ ลูกหลาน)
+  userScopes           UserOrganizationScope[]
+
+  @@index([type])
+  @@index([parentId])
+  @@index([status])
+  @@map("organizations")
+}
+
+/// ตาราง reference ที่กำหนดว่า OrganizationType ใดเป็นลูกของ OrganizationType ใดได้บ้าง
+/// (parentType = null หมายถึง childType นั้นเป็นระดับบนสุด ไม่มี parent ได้ เช่น
+/// MAHATHERASAMAKHOM) เป็นข้อมูล seed/reference แก้ไขได้โดยไม่ต้อง migration schema ใหม่
+/// เมื่อโครงสร้างการปกครองจริงเปลี่ยนแปลง — ใช้โดย trigger บนตาราง organizations
+model OrganizationHierarchyRule {
+  id         String            @id @default(cuid())
+  childType  OrganizationType
+  parentType OrganizationType?
+  notes      String?
+  createdAt  DateTime          @default(now())
+
+  @@map("organization_hierarchy_rules")
+}
+
+/// ประวัติสถานะของหน่วยงานแบบ append-only (ไม่มี effectiveTo — คำนวณจาก effectiveFrom
+/// ของแถวถัดไปตอน query แทน เพื่อไม่ต้อง update แถวเก่าเลยแม้แต่ครั้งเดียว) บังคับ
+/// immutable ด้วย DB trigger เดียวกับแนวทางที่ใช้กับ audit_logs (ดู migration.sql)
+/// ตาม data-policy.md ข้อ 7 ("audit record เขียนได้ครั้งเดียว ไม่แก้ไขย้อนหลัง")
+model OrganizationStatusHistory {
+  id             String             @id @default(cuid())
+  organizationId String
+  organization   Organization       @relation(fields: [organizationId], references: [id])
+  status         OrganizationStatus
+  effectiveFrom  DateTime
+  /// เหตุผลการเปลี่ยนสถานะ เช่น "ยุบรวมกับวัด...", "ก่อตั้งใหม่ตามประกาศ..."
+  reason      String?
+  /// เลขที่คำสั่ง/ประกาศที่เกี่ยวข้อง
+  documentRef String?
+  /// ผู้บันทึก — null ได้สำหรับ data migration/seed ครั้งแรก
+  recordedByActorId String?
+  recordedByActor   User?   @relation(fields: [recordedByActorId], references: [id])
+
+  createdAt DateTime @default(now())
+
+  @@unique([organizationId, effectiveFrom])
+  @@index([organizationId])
+  @@index([recordedByActorId])
+  @@map("organization_status_history")
+}
+
+/// ที่อยู่ของหน่วยงาน — อนุญาตหลายที่อยู่ต่อหน่วยงาน (แยกตาม AddressType) โดยมีได้
+/// อย่างมาก 1 แถวที่เป็น "ปัจจุบัน" (isCurrent = true) ต่อ (organizationId, addressType)
+/// บังคับด้วย partial unique index (ดู migration.sql) การแก้ที่อยู่ใหม่ = insert แถวใหม่
+/// + ปิดแถวเก่า (isCurrent = false) ไม่ overwrite ค่าที่อยู่เดิมในแถวเก่า
+model Address {
+  id             String       @id @default(cuid())
+  organizationId String
+  organization   Organization @relation(fields: [organizationId], references: [id])
+  addressType    AddressType
+
+  houseNo     String?
+  moo         String?
+  soi         String?
+  road        String?
+  subDistrict String?
+  district    String?
+  province    String?
+  postalCode  String?
+  country     String  @default("ไทย")
+
+  isCurrent Boolean @default(true)
+
+  createdAt DateTime  @default(now())
+  updatedAt DateTime  @updatedAt
+  deletedAt DateTime?
+
+  @@index([organizationId, addressType])
+  @@map("addresses")
+}
+
+/// ช่องทางติดต่อของหน่วยงาน — หลายแถวพร้อมกันได้ต่อหน่วยงาน (เช่น มีทั้งเบอร์โทรและอีเมล)
+/// แก้ไขค่าในแถวเดิมได้ตามปกติ (ไม่ใช่ append-only เหมือน status history) เพราะการ
+/// เปลี่ยนเบอร์โทร/อีเมลไม่ใช่ "ประวัติสำคัญ" ระดับเดียวกับสถานะหน่วยงาน — แต่ทุกการแก้ไข
+/// ยังคงถูกบันทึกลง AuditLog (generic) ตาม dev-rules.md ข้อ 6 อยู่ดี
+model Contact {
+  id             String       @id @default(cuid())
+  organizationId String
+  organization   Organization @relation(fields: [organizationId], references: [id])
+  type           ContactType
+  /// ค่าที่ติดต่อ — ห้ามใส่ข้อมูลบุคคลจริงใน dev/test (data-policy.md ข้อ 3)
+  value     String
+  label     String?
+  isPrimary Boolean @default(false)
+
+  createdAt DateTime  @default(now())
+  updatedAt DateTime  @updatedAt
+  deletedAt DateTime?
+
+  @@index([organizationId])
+  @@map("contacts")
+}
+
+/// Catalog ของตำแหน่ง/สมณศักดิ์ในสายการปกครอง (เจ้าอาวาส, เจ้าคณะตำบล, เจ้าคณะอำเภอ,
+/// เจ้าคณะจังหวัด, เจ้าคณะภาค, กรรมการมหาเถรสมาคม, แม่กองธรรม/บาลีสนามหลวง ฯลฯ) —
+/// เป็นตาราง master data ไม่ใช่ตัวการแต่งตั้งจริง (ดู Appointment)
+model Position {
+  id    String  @id @default(cuid())
+  code  String  @unique
+  title String
+  titleEn String?
+
+  /// ประเภทหน่วยงานที่ตำแหน่งนี้มักสังกัดอยู่ — เพื่อช่วยตรวจสอบที่ application layer
+  /// เวลาสร้าง Appointment ใหม่ (ไม่ได้บังคับด้วย DB constraint ในเฟสนี้ ดูเหตุผลใน
+  /// data-dictionary.md หัวข้อ "ข้อจำกัดที่ทราบและยอมรับ")
+  applicableOrgType OrganizationType?
+  rankLevel         Int?
+  /// true = ตำแหน่งนี้ควรมีผู้ดำรงตำแหน่งพร้อมกันได้เพียง 1 คนต่อหน่วยงาน (เช่น เจ้าอาวาส)
+  /// บังคับใช้ที่ application layer ภายใน transaction ตอนสร้าง Appointment ใหม่
+  /// (data-policy.md ข้อ 10 — transaction สำหรับ operation ที่ต้อง atomic)
+  isUniquePerOrganization Boolean @default(false)
+  isActive                Boolean @default(true)
+
+  createdAt DateTime  @default(now())
+  updatedAt DateTime  @updatedAt
+  deletedAt DateTime?
+
+  appointments Appointment[]
+
+  @@index([applicableOrgType])
+  @@map("positions")
+}
+
+/// STUB ขั้นต่ำสุด — ไม่ใช่ทะเบียนพระภิกษุ/สามเณรฉบับเต็ม (out of scope งานนี้ ดูหมายเหตุ
+/// ด้านบนของไฟล์และ data-dictionary.md) มีไว้เพียงเพื่อให้ Appointment อ้างอิง FK ได้
+/// ฟิลด์ประวัติการบวช/การศึกษา/การย้ายสังกัด ฯลฯ จะออกแบบในงานทะเบียนคณะสงฆ์เต็มรูปแบบ
+/// ในเฟสถัดไป (M1 ตาม requirements.md)
+model Person {
+  id            String    @id @default(cuid())
+  /// รหัสอ้างอิงสำหรับเชื่อมกับทะเบียนฉบับเต็มในอนาคต — ไม่บังคับตอนนี้
+  referenceCode String?   @unique
+  /// คำนำหน้า เช่น "พระ", "พระครู", "สามเณร" — เก็บเป็น free text ในเฟสนี้ ยังไม่ทำ
+  /// เป็น catalog สมณศักดิ์เต็มรูปแบบ (out of scope)
+  prefix   String?
+  fullName String
+
+  createdAt DateTime  @default(now())
+  updatedAt DateTime  @updatedAt
+  deletedAt DateTime?
+
+  appointments Appointment[]
+  /// เชื่อมกับตัวตนผู้ใช้ที่ login (ถ้ามี) — ดูหมายเหตุที่ User.personId
+  user User?
+
+  @@map("persons")
+}
+
+/// การแต่งตั้งดำรงตำแหน่ง — ผูก Person + Position + Organization ในช่วงเวลาหนึ่ง
+/// "ประวัติ" ของการแต่งตั้งคือแถวเดิมที่ไม่ถูกลบเมื่อสิ้นสุดวาระ (ปิดด้วย endDate +
+/// status เท่านั้น) การแต่งตั้งครั้งใหม่ = แถวใหม่เสมอ ไม่เขียนทับแถวเดิม ตาม
+/// data-policy.md ข้อ 7 — ทุกการแก้ไข (เช่น ปิดวาระ) ยังถูกบันทึกลง AuditLog ด้วย
+model Appointment {
+  id String @id @default(cuid())
+
+  organizationId String
+  organization   Organization @relation("AppointmentOrganization", fields: [organizationId], references: [id])
+  positionId     String
+  position       Position     @relation(fields: [positionId], references: [id])
+  personId       String
+  person         Person       @relation(fields: [personId], references: [id])
+
+  /// หน่วยงานที่ออกคำสั่งแต่งตั้ง (เช่น มหาเถรสมาคมออกคำสั่งแต่งตั้งเจ้าคณะจังหวัด) —
+  /// อาจเป็นคนละหน่วยงานกับ organizationId ที่ไปดำรงตำแหน่ง จึงแยก relation
+  appointingOrganizationId String?
+  appointingOrganization   Organization? @relation("AppointmentIssuingOrganization", fields: [appointingOrganizationId], references: [id])
+
+  startDate DateTime
+  endDate   DateTime?
+  status    AppointmentStatus @default(ACTIVE)
+  /// เลขที่คำสั่งแต่งตั้ง
+  documentRef String?
+  notes       String?
+
+  createdAt DateTime  @default(now())
+  updatedAt DateTime  @updatedAt
+  /// Soft delete — ใช้เฉพาะกรณีบันทึกผิดพลาด (data entry error) เท่านั้น การสิ้นสุดวาระ
+  /// ตามปกติให้ปิดด้วย endDate + status ไม่ใช่ deletedAt
+  deletedAt DateTime?
+
+  @@unique([organizationId, positionId, personId, startDate])
+  @@index([organizationId, positionId, status])
+  @@index([personId])
+  @@map("appointments")
+}
+
+// =====================================================================
+// P2 Database & Sangha Domain — โดเมนนักธรรม/ธรรมศึกษา/บาลี (M2)
+// programs / levels / subjects / curriculum / academic years /
+// exam sessions / exam centers
+// =====================================================================
+
+enum ExamType {
+  MULTIPLE_CHOICE
+  ESSAY
+  MIXED
+
+  @@map("exam_type")
+}
+
+enum ExamSessionStatus {
+  PLANNED
+  REGISTRATION_OPEN
+  REGISTRATION_CLOSED
+  IN_PROGRESS
+  COMPLETED
+  CANCELLED
+
+  @@map("exam_session_status")
+}
+
+/// ปีการศึกษา (พ.ศ.) — เป็นตารางข้อมูล ไม่ใช่ enum ตามข้อกำหนด "ไม่ hard-code ปี"
+/// เพิ่มปีใหม่ทุกปีด้วย INSERT ธรรมดา ไม่ต้อง migrate schema
+model AcademicYear {
+  id        String    @id @default(cuid())
+  /// พ.ศ. เช่น 2568 — unique
+  yearBE    Int       @unique
+  label     String?
+  startDate DateTime?
+  endDate   DateTime?
+  isActive  Boolean   @default(true)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  curriculaEffectiveFrom Curriculum[]
+  examSessions           ExamSession[]
+  /// เอกสารคลังข้อสอบที่ผูกปีการศึกษานี้ (P4 "สร้างคลังข้อสอบ + Search" — nullable
+  /// ที่ Document, ไม่ใช่ทุกเอกสารต้องผูกปี)
+  documents              Document[]
+
+  @@map("academic_years")
+}
+
+/// สายการศึกษา — นักธรรม, ธรรมศึกษา, บาลี เป็นตารางข้อมูล (ไม่ใช่ enum) เผื่อกรณีมีสาย
+/// การศึกษาเพิ่มเติมในอนาคตที่ยังไม่ทราบตอนออกแบบ
+model Program {
+  id          String  @id @default(cuid())
+  code        String  @unique
+  name        String
+  nameEn      String?
+  description String?
+  isActive    Boolean @default(true)
+
+  createdAt DateTime  @default(now())
+  updatedAt DateTime  @updatedAt
+  deletedAt DateTime?
+
+  levels     Level[]
+  curricula  Curriculum[]
+  examSessions ExamSession[]
+  /// scope-based RBAC (P3 M9) — ผู้ใช้ที่ได้รับสิทธิ์ครอบคลุมสายการศึกษานี้
+  userScopes   UserProgramScope[]
+
+  @@map("programs")
+}
+
+/// ระดับชั้นภายในสายการศึกษาหนึ่ง (นักธรรมตรี/โท/เอก, ธรรมศึกษาตรี/โท/เอก,
+/// บาลีประโยค 1-2 ถึง ป.ธ.9) — เป็นตารางข้อมูลตามข้อกำหนด "ไม่ hard-code ชั้น"
+/// sortOrder ใช้จัดลำดับการแสดงผล ไม่ใช่ตัวเลขชั้นทางธุรกิจ (เผื่อบางสายมีการแทรก
+/// ระดับย่อยในอนาคตโดยไม่ต้องเปลี่ยนเลขของระดับอื่น)
+model Level {
+  id        String  @id @default(cuid())
+  programId String
+  program   Program @relation(fields: [programId], references: [id])
+  /// รหัสระดับ — unique ภายใน program เดียวกัน (ไม่ unique ข้าม program เพราะ
+  /// นักธรรมกับธรรมศึกษาอาจใช้รหัสซ้ำกันได้ เช่น "TRI" ทั้งคู่)
+  code      String
+  name      String
+  sortOrder Int
+  isActive  Boolean @default(true)
+
+  createdAt DateTime  @default(now())
+  updatedAt DateTime  @updatedAt
+  deletedAt DateTime?
+
+  curriculumLevelSubjects CurriculumLevelSubject[]
+  questions               Question[]
+  /// เอกสารคลังข้อสอบที่ผูกระดับชั้นนี้ (P4 "สร้างคลังข้อสอบ + Search")
+  documents               Document[]
+
+  @@unique([programId, code])
+  @@index([programId])
+  @@map("education_levels")
+}
+
+/// รายวิชา — master list ที่ใช้ซ้ำได้ข้ามหลายระดับชั้น/หลายหลักสูตร (เช่น
+/// "เรียงความแก้กระทู้ธรรม" ปรากฏในหลายชั้นของนักธรรม)
+model Subject {
+  id          String  @id @default(cuid())
+  code        String  @unique
+  name        String
+  nameEn      String?
+  description String?
+  isActive    Boolean @default(true)
+
+  createdAt DateTime  @default(now())
+  updatedAt DateTime  @updatedAt
+  deletedAt DateTime?
+
+  curriculumLevelSubjects CurriculumLevelSubject[]
+  questions               Question[]
+  /// เอกสารคลังข้อสอบที่ผูกวิชานี้ (P4 "สร้างคลังข้อสอบ + Search")
+  documents               Document[]
+
+  @@map("subjects")
+}
+
+/// หลักสูตร (เวอร์ชัน) ของสายการศึกษาหนึ่ง — APPEND-ONLY เหมือน
+/// OrganizationStatusHistory ในโดเมนคณะสงฆ์ (ไม่มี effectiveTo — คำนวณจาก
+/// effectiveFromYear ของเวอร์ชันถัดไปตอน query แทน) เหตุผล: ต้องสามารถย้อนดูได้เสมอว่า
+/// "ปีการศึกษา X ใช้หลักสูตรเวอร์ชันไหน" แม้หลักสูตรจะถูกปรับปรุงในภายหลัง — ตาม
+/// data-policy.md ข้อ 7 การแก้ไขข้อผิดพลาดของหลักสูตรทำโดย "เพิ่มเวอร์ชันใหม่ที่แก้ไข"
+/// ไม่ใช่ update ของเดิม (ดูรายละเอียดใน prisma/education-schema.md)
+model Curriculum {
+  id          String  @id @default(cuid())
+  programId   String
+  program     Program @relation(fields: [programId], references: [id])
+  code        String
+  name        String
+  description String?
+
+  effectiveFromYearId String
+  effectiveFromYear   AcademicYear @relation(fields: [effectiveFromYearId], references: [id])
+
+  createdAt DateTime @default(now())
+
+  curriculumLevelSubjects CurriculumLevelSubject[]
+  examSessions            ExamSession[]
+
+  @@unique([programId, effectiveFromYearId])
+  @@unique([programId, code])
+  @@index([programId])
+  @@map("curricula")
+}
+
+/// เนื้อหาหลักสูตรจริง — วิชาใดอยู่ในระดับชั้นใดของหลักสูตรเวอร์ชันใด พร้อมเกณฑ์คะแนน
+/// เป็นตารางที่ "mutable" ได้ตามปกติ (ต่างจาก Curriculum เอง) สำหรับแก้ไขก่อนนำไปใช้จริง
+/// — แต่ห้ามแก้ไขเนื้อหาของหลักสูตรเวอร์ชันที่มี ExamSession ที่ผ่านการดำเนินการแล้ว
+/// อ้างอิงอยู่ (บังคับที่ application layer ดู Function Specification ใน
+/// prisma/education-schema.md — ไม่ใช่ DB constraint เพราะต้อง join ข้าม table)
+model CurriculumLevelSubject {
+  id           String     @id @default(cuid())
+  curriculumId String
+  curriculum   Curriculum @relation(fields: [curriculumId], references: [id])
+  levelId      String
+  level        Level      @relation(fields: [levelId], references: [id])
+  subjectId    String
+  subject      Subject    @relation(fields: [subjectId], references: [id])
+
+  maxScore  Int
+  passScore Int
+  examType  ExamType
+  sortOrder Int
+  isActive  Boolean @default(true)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  examSchedules ExamSchedule[]
+  examSets      ExamSet[]
+
+  @@unique([curriculumId, levelId, subjectId])
+  @@index([curriculumId, levelId])
+  @@map("curriculum_level_subjects")
+}
+
+/// สนามสอบ — อาจอ้างอิงหน่วยงาน (Organization จากโดเมนคณะสงฆ์ เช่น วัดที่ใช้เป็น
+/// สนามสอบ) หรือเป็นสถานที่อิสระที่ยังไม่ได้ขึ้นทะเบียนเป็นหน่วยงาน (organizationId
+/// เป็น null ได้)
+model ExamCenter {
+  id             String        @id @default(cuid())
+  code           String        @unique
+  name           String
+  organizationId String?
+  organization   Organization? @relation(fields: [organizationId], references: [id])
+  province       String?
+  district       String?
+  capacity       Int?
+  isActive       Boolean       @default(true)
+
+  createdAt DateTime  @default(now())
+  updatedAt DateTime  @updatedAt
+  deletedAt DateTime?
+
+  examSessionCenters ExamSessionCenter[]
+
+  @@index([organizationId])
+  @@map("exam_centers")
+}
+
+/// รอบสอบ — การจัดสอบของสายการศึกษาหนึ่งในปีการศึกษาหนึ่ง (รองรับหลายรอบต่อปีผ่าน
+/// roundNumber) อ้างอิง Curriculum ที่ใช้จริงสำหรับรอบนี้อย่างชัดเจน (ไม่ derive จาก
+/// วันที่ ณ runtime) เพื่อให้ประวัติแม่นยำแม้ curriculum เวอร์ชันปัจจุบันจะเปลี่ยนไปแล้ว
+model ExamSession {
+  id             String       @id @default(cuid())
+  programId      String
+  program        Program      @relation(fields: [programId], references: [id])
+  academicYearId String
+  academicYear   AcademicYear @relation(fields: [academicYearId], references: [id])
+  curriculumId   String
+  curriculum     Curriculum   @relation(fields: [curriculumId], references: [id])
+
+  roundNumber Int      @default(1)
+  name        String?
+  status      ExamSessionStatus @default(PLANNED)
+
+  registrationOpenDate  DateTime?
+  registrationCloseDate DateTime?
+  examStartDate         DateTime?
+  examEndDate           DateTime?
+
+  createdAt DateTime  @default(now())
+  updatedAt DateTime  @updatedAt
+  deletedAt DateTime?
+
+  examSessionCenters ExamSessionCenter[]
+  examSchedules      ExamSchedule[]
+  examSets           ExamSet[]
+
+  @@unique([programId, academicYearId, roundNumber])
+  @@index([programId, academicYearId])
+  @@index([status])
+  @@map("exam_sessions")
+}
+
+/// สนามสอบที่ใช้ในรอบสอบหนึ่งๆ (many-to-many ระหว่าง ExamSession กับ ExamCenter)
+model ExamSessionCenter {
+  id            String      @id @default(cuid())
+  examSessionId String
+  examSession   ExamSession @relation(fields: [examSessionId], references: [id])
+  examCenterId  String
+  examCenter    ExamCenter  @relation(fields: [examCenterId], references: [id])
+  notes         String?
+
+  createdAt DateTime @default(now())
+
+  @@unique([examSessionId, examCenterId])
+  @@index([examSessionId])
+  @@map("exam_session_centers")
+}
+
+/// ตารางสอบ — วิชาใด (ผ่าน CurriculumLevelSubject) สอบวันเวลาใดภายในรอบสอบหนึ่ง
+/// กำหนดจากส่วนกลางเพียงชุดเดียวต่อรอบสอบ ใช้เหมือนกันทุกสนามสอบ (ตามแนวทางจริงของ
+/// การสอบสนามหลวง — ไม่ผูกกับ ExamCenter ใดเป็นการเฉพาะ)
+model ExamSchedule {
+  id                       String                 @id @default(cuid())
+  examSessionId            String
+  examSession              ExamSession            @relation(fields: [examSessionId], references: [id])
+  curriculumLevelSubjectId String
+  curriculumLevelSubject   CurriculumLevelSubject @relation(fields: [curriculumLevelSubjectId], references: [id])
+
+  startAt DateTime
+  endAt   DateTime
+
+  createdAt DateTime  @default(now())
+  updatedAt DateTime  @updatedAt
+  deletedAt DateTime?
+
+  @@unique([examSessionId, curriculumLevelSubjectId])
+  @@index([examSessionId])
+  @@map("exam_schedules")
+}
+
+// =====================================================================
+// P2 Database & Sangha Domain — คลังข้อสอบและเอกสาร (M3)
+// exam sets / questions / choices / answer keys / documents / versions /
+// categories / tags — รายละเอียดเหตุผลทั้งหมดอยู่ใน prisma/exam-document-schema.md
+// =====================================================================
+
+/// สถานะ workflow อนุมัติ — ใช้ร่วมกันสำหรับ QuestionVersion, DocumentVersion, ExamSet
+/// DRAFT คือสถานะเดียวที่ยังแก้ไข/ลบแถวได้อิสระ เมื่อพ้น DRAFT ไปแล้ว (ไม่ว่าจะเป็นค่าใด
+/// ในรายการนี้) DB trigger จะล็อกแถวนั้นถาวร (ดู migration.sql) — แก้ไขต่อ = ต้องสร้าง
+/// เวอร์ชัน/แถวใหม่เท่านั้น ตรงตามข้อกำหนด "เวอร์ชัน — ห้ามลบ/เขียนทับของเดิม"
+enum ApprovalStatus {
+  DRAFT
+  PENDING_REVIEW
+  APPROVED
+  REJECTED
+  RETIRED
+
+  @@map("approval_status")
+}
+
+/// ชนิดเอกสาร — จำแนกไฟล์แนบที่ไม่ใช่ตัวข้อสอบ (ตัวข้อสอบอยู่ใน Question/QuestionVersion
+/// โดยตรง) เช่น กระดาษคำตอบเปล่า, ระเบียบ/ประกาศ, เอกสารประกอบการสอน
+enum DocumentType {
+  EXAM_PAPER_PRINT
+  ANSWER_SHEET_TEMPLATE
+  CIRCULAR
+  STUDY_MATERIAL
+  OTHER
+
+  @@map("document_type")
+}
+
+/// หมวดหมู่ — ใช้ร่วมกันได้ทั้งข้อสอบและเอกสาร (many-to-many ผ่าน QuestionCategory /
+/// DocumentCategory) แยกจาก Tag เพราะ Category คาดว่าเป็นชุดที่ควบคุม/ดูแลโดย admin
+/// (เช่น "หมวดศีลธรรม", "หมวดพระวินัย") ส่วน Tag เปิดให้ผู้ใช้งานเพิ่มได้อิสระกว่า
+model Category {
+  id          String  @id @default(cuid())
+  name        String
+  code        String? @unique
+  description String?
+  isActive    Boolean @default(true)
+
+  createdAt DateTime  @default(now())
+  updatedAt DateTime  @updatedAt
+  deletedAt DateTime?
+
+  questionCategories QuestionCategory[]
+  documentCategories DocumentCategory[]
+
+  @@map("categories")
+}
+
+/// แท็ก — free-form กว่า Category ไม่มี soft delete/สถานะ เพราะเป็นข้อมูลเสริมการค้นหา
+/// ล้วนๆ ไม่ใช่ข้อมูลหลักที่ต้องมีประวัติ
+model Tag {
+  id   String @id @default(cuid())
+  name String @unique
+
+  createdAt DateTime @default(now())
+
+  questionTags QuestionTag[]
+  documentTags DocumentTag[]
+
+  @@map("tags")
+}
+
+/// "ตัวตน" ของข้อสอบ — คงที่ตลอดอายุข้อสอบไม่ว่าจะแก้เนื้อหากี่ครั้ง (เนื้อหาจริง/คำตอบ
+/// อยู่ใน QuestionVersion/QuestionChoice/AnswerKey) ผูกกับ subject+level โดยตรง
+/// (ไม่ผูก curriculumLevelSubjectId เฉพาะเจาะจง) เพื่อให้นำข้อสอบเดิมกลับมาใช้ข้าม
+/// หลักสูตรเวอร์ชันใหม่ได้ — การค้นหา "ตามหลักสูตร/ปี" ทำผ่าน ExamSet/ExamSetItem
+/// แทน (มุมมองการใช้งานจริง ไม่ใช่คุณสมบัติถาวรของตัวข้อสอบ) reuse ExamType เดิม
+/// (ปรนัย=MULTIPLE_CHOICE / อัตนัย=ESSAY / MIXED) แทนการสร้าง enum ใหม่ที่ความหมายซ้ำกัน
+model Question {
+  id           String   @id @default(cuid())
+  subjectId    String
+  subject      Subject  @relation(fields: [subjectId], references: [id])
+  levelId      String
+  level        Level    @relation(fields: [levelId], references: [id])
+  questionType ExamType
+
+  createdAt DateTime  @default(now())
+  updatedAt DateTime  @updatedAt
+  deletedAt DateTime?
+
+  versions           QuestionVersion[]
+  questionCategories QuestionCategory[]
+  questionTags       QuestionTag[]
+
+  @@index([subjectId, levelId])
+  @@map("questions")
+}
+
+model QuestionCategory {
+  questionId String
+  question   Question @relation(fields: [questionId], references: [id])
+  categoryId String
+  category   Category @relation(fields: [categoryId], references: [id])
+
+  createdAt DateTime @default(now())
+
+  @@id([questionId, categoryId])
+  @@index([categoryId])
+  @@map("question_categories")
+}
+
+model QuestionTag {
+  questionId String
+  question   Question @relation(fields: [questionId], references: [id])
+  tagId      String
+  tag        Tag      @relation(fields: [tagId], references: [id])
+
+  createdAt DateTime @default(now())
+
+  @@id([questionId, tagId])
+  @@index([tagId])
+  @@map("question_tags")
+}
+
+/// เนื้อหาข้อสอบที่มีเวอร์ชัน (versionNo เพิ่มทีละ 1 ต่อ Question) — แก้ไขได้อิสระขณะ
+/// status = DRAFT เท่านั้น ทันทีที่ส่งเข้า workflow อนุมัติ (status ≠ DRAFT) DB trigger
+/// จะล็อกแถวนี้ถาวร (UPDATE/DELETE จะ raise exception) แก้ไขต่อ = insert แถวใหม่
+/// versionNo+1 เท่านั้น "เวอร์ชันปัจจุบัน" ของข้อสอบ = APPROVED ตัวล่าสุด (query โดย
+/// ORDER BY versionNo DESC WHERE status='APPROVED' LIMIT 1 เช่นเดียวกับ pattern
+/// Curriculum ในโดเมนการศึกษา)
+model QuestionVersion {
+  id         String @id @default(cuid())
+  questionId String
+  question   Question @relation(fields: [questionId], references: [id])
+  versionNo  Int
+
+  content String
+  status  ApprovalStatus @default(DRAFT)
+
+  authorActorId     String?
+  authorActor       User?     @relation("QuestionVersionAuthor", fields: [authorActorId], references: [id])
+  approvedByActorId String?
+  approvedByActor   User?     @relation("QuestionVersionApprover", fields: [approvedByActorId], references: [id])
+  approvedAt        DateTime?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  choices      QuestionChoice[]
+  answerKeys   AnswerKey[]
+  examSetItems ExamSetItem[]
+
+  @@unique([questionId, versionNo])
+  @@index([status])
+  @@map("question_versions")
+}
+
+/// ตัวเลือกคำตอบ (สำหรับข้อสอบปรนัย) — ผูกกับ QuestionVersion หนึ่งเวอร์ชันเท่านั้น
+/// (ไม่ผูกกับ Question โดยตรง) ล็อกถาวรทันทีที่ QuestionVersion แม่ พ้นสถานะ DRAFT
+/// (ตรวจผ่าน JOIN ใน trigger — ดู migration.sql)
+model QuestionChoice {
+  id                String          @id @default(cuid())
+  questionVersionId String
+  questionVersion   QuestionVersion @relation(fields: [questionVersionId], references: [id])
+  label             String
+  content           String
+  sortOrder         Int
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  answerKeysAsCorrect AnswerKey[]
+
+  @@unique([questionVersionId, label])
+  @@index([questionVersionId])
+  @@map("question_choices")
+}
+
+/// เฉลย — แยกตารางจาก QuestionVersion โดยเจตนา (ไม่ใช่คอลัมน์ในตารางเดียวกัน) เพื่อให้
+/// ในอนาคตกำหนดสิทธิ์ SELECT เข้มงวดกว่าตัวข้อสอบได้โดยไม่ต้องเปลี่ยนโครงสร้างตาราง
+/// (เช่น เฉพาะกรรมการออกข้อสอบเท่านั้นที่ query ตารางนี้ได้) รองรับทั้งปรนัย
+/// (correctChoiceId) และอัตนัย (modelAnswer/scoringGuide) ในแถวเดียวกัน — ล็อกถาวร
+/// ตาม status ของ QuestionVersion แม่เช่นเดียวกับ QuestionChoice
+model AnswerKey {
+  id                String          @id @default(cuid())
+  questionVersionId String
+  questionVersion   QuestionVersion @relation(fields: [questionVersionId], references: [id])
+
+  correctChoiceId String?
+  correctChoice   QuestionChoice? @relation(fields: [correctChoiceId], references: [id])
+  modelAnswer     String?
+  scoringGuide    String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([questionVersionId])
+  @@map("answer_keys")
+}
+
+/// "ตัวตน" ของเอกสาร — เช่นเดียวกับ Question เนื้อหา/ไฟล์จริงอยู่ใน DocumentVersion
+///
+/// ส่วนขยายจากงาน "สร้างคลังข้อสอบ + Search" (P4 Public Front End — ดู
+/// prisma/exam-bank-pages.md §2 สำหรับเหตุผลเต็ม): เพิ่ม levelId/subjectId/
+/// academicYearId (ทั้งหมด nullable) เพื่อให้กรองเอกสารตาม "หลักสูตร (ผ่าน
+/// level.programId)/ชั้น/ปี/วิชา" ได้ตามที่งานนี้ระบุ — ตั้งใจผูกกับ levelId+
+/// subjectId โดยตรง (เหมือน Question ข้อ 4 ใน exam-document-schema.md) ไม่ผูก
+/// curriculumLevelSubjectId เฉพาะเจาะจง เพราะเอกสาร (เช่น ข้อสอบเก่าที่พิมพ์แล้ว)
+/// ผูกกับ "ชั้น+วิชา" ในความเป็นจริง ไม่ใช่หลักสูตรเวอร์ชันใดเวอร์ชันหนึ่งเจาะจง —
+/// nullable ทั้งสามเพราะเอกสารบางประเภท (CIRCULAR/OTHER) ไม่จำเป็นต้องผูกชั้น/
+/// วิชา/ปีใดเลย
+///
+/// ส่วนขยายจากงาน "สร้างห้องสมุด PDF/Download" (P4 Public Front End — ดู
+/// prisma/library-pages.md §2 สำหรับเหตุผลเต็ม): เพิ่ม isPublic (NOT NULL,
+/// default false — deny-by-default) เพื่อแยกเอกสารที่เผยแพร่ต่อ Guest ได้
+/// (true) ออกจากเอกสารที่ต้อง login ก่อนจึงเห็น (false — ระดับ "Internal" ตาม
+/// data-policy.md ข้อ 2) ทั้งหน้าคลังข้อสอบ (/exam-bank) และห้องสมุด (/library)
+/// ใช้ฟิลด์นี้ร่วมกัน (ไม่มี isPublic=false รั่วไหลผ่านเส้นทางใดเส้นทางหนึ่ง)
+model Document {
+  id           String       @id @default(cuid())
+  title        String
+  documentType DocumentType
+  /// true = เผยแพร่ต่อ Guest ได้ (Public), false = ต้อง login ก่อนจึงเห็น
+  /// (Internal — ดู data-policy.md ข้อ 2) default false = deny-by-default
+  isPublic     Boolean      @default(false)
+
+  levelId        String?
+  level          Level?        @relation(fields: [levelId], references: [id])
+  subjectId      String?
+  subject        Subject?      @relation(fields: [subjectId], references: [id])
+  academicYearId String?
+  academicYear   AcademicYear? @relation(fields: [academicYearId], references: [id])
+
+  createdAt DateTime  @default(now())
+  updatedAt DateTime  @updatedAt
+  deletedAt DateTime?
+
+  versions           DocumentVersion[]
+  documentCategories DocumentCategory[]
+  documentTags       DocumentTag[]
+
+  @@index([documentType])
+  @@index([levelId, subjectId])
+  @@index([academicYearId])
+  @@index([isPublic])
+  @@map("documents")
+}
+
+model DocumentCategory {
+  documentId String
+  document   Document @relation(fields: [documentId], references: [id])
+  categoryId String
+  category   Category @relation(fields: [categoryId], references: [id])
+
+  createdAt DateTime @default(now())
+
+  @@id([documentId, categoryId])
+  @@index([categoryId])
+  @@map("document_categories")
+}
+
+model DocumentTag {
+  documentId String
+  document   Document @relation(fields: [documentId], references: [id])
+  tagId      String
+  tag        Tag      @relation(fields: [tagId], references: [id])
+
+  createdAt DateTime @default(now())
+
+  @@id([documentId, tagId])
+  @@index([tagId])
+  @@map("document_tags")
+}
+
+/// เนื้อหาเอกสารที่มีเวอร์ชัน — pattern เดียวกับ QuestionVersion ทุกประการ (DRAFT แก้ไขได้
+/// อิสระ, พ้น DRAFT แล้วล็อกถาวรด้วย DB trigger) fileKey/fileName/mimeType/fileSize เป็น
+/// เพียงคอลัมน์ placeholder สำหรับอ้างอิงไฟล์จริงใน object storage ในอนาคต (M8 —
+/// ยังไม่เชื่อมกับระบบจัดเก็บไฟล์จริงในงานนี้ ไม่มี business logic ตรวจสอบไฟล์)
+model DocumentVersion {
+  id         String   @id @default(cuid())
+  documentId String
+  document   Document @relation(fields: [documentId], references: [id])
+  versionNo  Int
+
+  fileKey  String?
+  fileName String?
+  mimeType String?
+  fileSize Int?
+
+  status ApprovalStatus @default(DRAFT)
+
+  authorActorId     String?
+  authorActor       User?     @relation("DocumentVersionAuthor", fields: [authorActorId], references: [id])
+  approvedByActorId String?
+  approvedByActor   User?     @relation("DocumentVersionApprover", fields: [approvedByActorId], references: [id])
+  approvedAt        DateTime?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([documentId, versionNo])
+  @@index([status])
+  @@map("document_versions")
+}
+
+/// ชุดข้อสอบ — ผูกกับ CurriculumLevelSubject เสมอ (ให้ค้นตามหลักสูตร/ชั้น/วิชาได้โดยตรง)
+/// และผูกกับ ExamSessionId แบบ optional (ให้ค้นตามปีได้ผ่าน ExamSession.academicYearId
+/// เมื่อเป็นชุดที่ใช้สอบจริงในรอบสอบหนึ่ง) เป็น null ได้สำหรับชุดฝึกซ้อม/คลังส่วนกลางที่
+/// ยังไม่ผูกรอบสอบใด — นี่คือจุดที่ตอบโจทย์ "ค้นตามหลักสูตร/ชั้น/ปี/วิชาได้ด้วย index ที่
+/// เหมาะสม" ของ Question เอง (ดู comment บน model Question ด้านบนว่าทำไมไม่ผูกตรงนั้น)
+model ExamSet {
+  id                       String                 @id @default(cuid())
+  curriculumLevelSubjectId String
+  curriculumLevelSubject   CurriculumLevelSubject @relation(fields: [curriculumLevelSubjectId], references: [id])
+  examSessionId            String?
+  examSession              ExamSession?           @relation(fields: [examSessionId], references: [id])
+
+  name   String
+  status ApprovalStatus @default(DRAFT)
+
+  authorActorId     String?
+  authorActor       User?     @relation("ExamSetAuthor", fields: [authorActorId], references: [id])
+  approvedByActorId String?
+  approvedByActor   User?     @relation("ExamSetApprover", fields: [approvedByActorId], references: [id])
+  approvedAt        DateTime?
+
+  createdAt DateTime  @default(now())
+  updatedAt DateTime  @updatedAt
+  deletedAt DateTime?
+
+  items ExamSetItem[]
+
+  @@index([curriculumLevelSubjectId])
+  @@index([examSessionId])
+  @@index([status])
+  @@map("exam_sets")
+}
+
+/// ข้อสอบแต่ละข้อภายในชุดข้อสอบ — อ้างอิง QuestionVersion เจาะจง (ไม่ใช่ Question เฉยๆ)
+/// เพื่อให้ชุดข้อสอบที่ประกาศใช้แล้วอ้างอิงเนื้อหาข้อสอบเวอร์ชันที่แน่นอนตลอดไป แม้ข้อสอบ
+/// นั้นจะถูกแก้ไขและมีเวอร์ชันใหม่กว่าเกิดขึ้นภายหลัง — ล็อกถาวรตาม status ของ ExamSet
+/// แม่เช่นเดียวกับ QuestionChoice/AnswerKey (ตรวจผ่าน JOIN ใน trigger)
+model ExamSetItem {
+  id                String          @id @default(cuid())
+  examSetId         String
+  examSet           ExamSet         @relation(fields: [examSetId], references: [id])
+  questionVersionId String
+  questionVersion   QuestionVersion @relation(fields: [questionVersionId], references: [id])
+  sortOrder         Int
+  score             Int?
+
+  createdAt DateTime @default(now())
+
+  @@unique([examSetId, sortOrder])
+  @@index([examSetId])
+  @@index([questionVersionId])
+  @@map("exam_set_items")
+}
+
+// =====================================================================
+// P4 Public Front End — งาน "สร้างหน้า Home + ข่าว/บทความ": ข่าว/ประกาศ
+// (user-flows.md Flow 1 — ข่าว; sitemap.md `/news`, `/news/[slug]`)
+//
+// นี่คือ **M10. ระบบข่าวสาร/ประกาศ** ที่ user-flows.md หัวข้อ "สรุป Flow ↔
+// Module ↔ Sitemap" ระบุไว้ว่า "ไม่ผูกกับ M1–M9 โดยตรง — เป็น content module
+// เสริม" และ "จะเพิ่มเป็น M10 ใน requirements.md เมื่อ Owner ยืนยันขอบเขต" —
+// สร้าง schema ในงานนี้เพื่อรองรับหน้า Public (F1.1 ดูรายการข่าว, F1.2 ดู
+// รายละเอียดข่าว) ที่เป็นขอบเขตของงานนี้ ส่วนฝั่งเขียนข้อมูล (F1.3 สร้าง/แก้ไข,
+// F1.4 เผยแพร่/ถอด ผ่าน `/admin/news`) ยังไม่ implement ในงานนี้ (ดู
+// prisma/news-articles.md หัวข้อ "ขอบเขตที่ตัดออก") — schema ออกแบบให้รองรับ
+// งาน admin นั้นได้ทันทีในอนาคตโดยไม่ต้อง migration ใหม่ (status/publishedAt
+// พร้อมอยู่แล้ว)
+//
+// ทำไมไม่ใช้ pattern conditional-immutability เหมือน QuestionVersion/
+// DocumentVersion/ExamSet: เนื้อหาข่าวไม่ใช่ข้อมูลที่ต้อง "ล็อกถาวร" เพื่อความ
+// ถูกต้องของประวัติการสอบ — F1.3 ต้องการแค่ "audit บันทึกผู้แก้ไข/เวลา/ค่า
+// ก่อน-หลังทุกครั้ง" ซึ่งตาราง audit_logs (polymorphic, มีอยู่แล้วตั้งแต่ P1)
+// รองรับได้โดยตรงโดยไม่ต้องสร้างตาราง version/history เฉพาะทางเพิ่ม — การ
+// ตัดสินใจนี้จะถูกใช้จริงเมื่องาน admin news เริ่มพัฒนา (นอกขอบเขตงานนี้)
+enum NewsArticleStatus {
+  DRAFT
+  PUBLISHED
+  UNPUBLISHED
+}
+
+/// หมวดหมู่ข่าว — flat (ไม่ซ้อนชั้น) ตามที่ระบุใน user-flows.md F1.1 "หมวดหมู่
+/// (optional filter)" ไม่มี requirement ให้ซ้อนหมวดหมู่ย่อยในเฟสนี้
+model NewsCategory {
+  id   String @id @default(cuid())
+  slug String @unique
+  name String
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  articles NewsArticleCategory[]
+
+  @@map("news_categories")
+}
+
+/// บทความ/ข่าว — `content` เป็น plain text/markdown ธรรมดา (ไม่มี rich-text/HTML
+/// sanitize pipeline ในงานนี้ — ข้อมูลเป็น seed สมมติที่ควบคุมเองทั้งหมด ไม่ใช่
+/// input จากผู้ใช้ภายนอก) `coverImageUrl` เป็นเพียง URL/placeholder ตาม data-policy
+/// ข้อ 3 (ยังไม่เชื่อม Object Storage จริง — M8) `deletedAt` = soft delete ตาม
+/// pattern เดิมทั้งโปรเจกต์ (ไม่ hard delete ข้อมูลที่เคยเผยแพร่)
+model NewsArticle {
+  id            String            @id @default(cuid())
+  slug          String            @unique
+  title         String
+  summary       String?
+  coverImageUrl String?
+  content       String
+  status        NewsArticleStatus @default(DRAFT)
+
+  /// เวลาที่เผยแพร่ล่าสุด — ใช้เรียงลำดับ "ข่าวล่าสุด" (F1.1) แทน createdAt เพราะ
+  /// บทความอาจถูกร่างไว้ล่วงหน้านานแล้วค่อยเผยแพร่ทีหลัง
+  publishedAt DateTime?
+
+  authorActorId String?
+  authorActor   User?   @relation("NewsArticleAuthor", fields: [authorActorId], references: [id])
+
+  createdAt DateTime  @default(now())
+  updatedAt DateTime  @updatedAt
+  deletedAt DateTime?
+
+  categories NewsArticleCategory[]
+
+  /// ใช้ตอบ query หลักของ public listing โดยตรง: WHERE status='PUBLISHED'
+  /// ORDER BY publishedAt DESC
+  @@index([status, publishedAt])
+  @@map("news_articles")
+}
+
+model NewsArticleCategory {
+  articleId  String
+  article    NewsArticle  @relation(fields: [articleId], references: [id])
+  categoryId String
+  category   NewsCategory @relation(fields: [categoryId], references: [id])
+
+  createdAt DateTime @default(now())
+
+  @@id([articleId, categoryId])
+  @@index([categoryId])
+  @@map("news_article_categories")
+}
